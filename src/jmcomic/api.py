@@ -1,144 +1,125 @@
-from .jm_option import *
+from .jm_downloader import *
+
+__DOWNLOAD_API_RET = Tuple[JmAlbumDetail, JmDownloader]
 
 
-def download_album(jm_album_id, option=None):
+def download_batch(download_api,
+                   jm_id_iter: Union[Iterable, Generator],
+                   option=None,
+                   downloader=None,
+                   ) -> Set[__DOWNLOAD_API_RET]:
     """
-    下载一个本子集，入口api
-    @param jm_album_id: 禁漫的本子的id，类型可以是str/int/iterable[str]。
-    如果是iterable[str]，则会调用批量下载方法 download_album_batch
-    @param option: 下载选项，为空默认是 JmOption.default()
+    批量下载 album / photo
+
+    一个album/photo，对应一个线程，对应一个option
+
+    :param download_api: 下载api
+    :param jm_id_iter: jmid (album_id, photo_id) 的迭代器
+    :param option: 下载选项，所有的jmid共用一个option
+    :param downloader: 下载器类
+    """
+    from common import multi_thread_launcher
+
+    if option is None:
+        option = JmModuleConfig.option_class().default()
+
+    result = set()
+
+    def callback(*ret):
+        result.add(ret)
+
+    multi_thread_launcher(
+        iter_objs=set(
+            JmcomicText.parse_to_jm_id(jmid)
+            for jmid in jm_id_iter
+        ),
+        apply_each_obj_func=lambda aid: download_api(aid,
+                                                     option,
+                                                     downloader,
+                                                     callback=callback,
+                                                     ),
+        wait_finish=True
+    )
+
+    return result
+
+
+def download_album(jm_album_id,
+                   option=None,
+                   downloader=None,
+                   callback=None,
+                   ) -> Union[__DOWNLOAD_API_RET, Set[__DOWNLOAD_API_RET]]:
+    """
+    下载一个本子（album），包含其所有的章节（photo）
+
+    当jm_album_id不是str或int时，视为批量下载，相当于调用 download_batch(download_album, jm_album_id, option, downloader)
+
+    :param jm_album_id: 本子的禁漫车号
+    :param option: 下载选项
+    :param downloader: 下载器类
+    :param callback: 返回值回调函数，可以拿到 album 和 downloader
+    :return: 对于的本子实体类，下载器（如果是上述的批量情况，返回值为download_batch的返回值）
     """
 
     if not isinstance(jm_album_id, (str, int)):
-        return download_album_batch(jm_album_id, option)
+        return download_batch(download_album, jm_album_id, option, downloader)
 
-    option, jm_client = build_client(option)
-    album: JmAlbumDetail = jm_client.get_album_detail(jm_album_id)
+    with new_downloader(option, downloader) as dler:
+        album = dler.download_album(jm_album_id)
 
-    jm_debug('album',
-             f'本子获取成功: [{album.id}], '
-             f'作者: [{album.author}], '
-             f'章节数: [{len(album)}]'
-             f'标题: [{album.title}], '
-             )
+        if callback is not None:
+            callback(album, dler)
 
-    def download_photo(photo: JmPhotoDetail,
-                       debug_topic='photo',
-                       ):
-        jm_client.check_photo(photo)
-
-        jm_debug(debug_topic,
-                 f'开始下载章节: {photo.id} ({photo.album_id}[{photo.index}/{len(album)}]), '
-                 f'标题: [{photo.title}], '
-                 f'图片数为[{len(photo)}]')
-
-        download_by_photo_detail(photo, option)
-
-        jm_debug(debug_topic, f'章节下载完成: {photo.id} ({photo.album_id}[{photo.index}/{len(album)}])')
-
-    thread_pool_executor(
-        iter_objs=album,
-        apply_each_obj_func=download_photo,
-    )
-
-    jm_debug('album', f'本子下载完成: [{album.id}]')
+        return album, dler
 
 
-def download_album_batch(jm_album_id_iter: Union[Iterable, Generator],
-                         option=None,
-                         wait_finish=True,
-                         ) -> List[Thread]:
+def download_photo(jm_photo_id,
+                   option=None,
+                   downloader=None,
+                   callback=None):
     """
-    批量下载album，每个album一个线程，使用的是同一个option。
-
-    @param jm_album_id_iter: album_id的可迭代对象
-    @param option: 下载选项，为空默认是 JmOption.default()
-    @param wait_finish: 是否要等待这些下载线程全部完成
-    @return 返回值是List[Thread]，里面是每个下载漫画的线程。
+    下载一个章节（photo），参数同 download_album
     """
+    if not isinstance(jm_photo_id, (str, int)):
+        return download_batch(download_photo, jm_photo_id, option)
+
+    with new_downloader(option, downloader) as dler:
+        photo = dler.download_photo(jm_photo_id)
+
+        if callback is not None:
+            callback(photo, dler)
+
+        return photo, dler
+
+
+def new_downloader(option=None, downloader=None) -> JmDownloader:
     if option is None:
-        option = JmOption.default()
+        option = JmModuleConfig.option_class().default()
 
-    return thread_pool_executor(
-        iter_objs=((album_id, option) for album_id in jm_album_id_iter),
-        apply_each_obj_func=download_album,
-        wait_finish=wait_finish,
-    )
+    if downloader is None:
+        downloader = JmModuleConfig.downloader_class()
 
-
-def download_photo(jm_photo_id, option=None):
-    """
-    下载一个本子的一章，入口api
-    """
-    option, jm_client = build_client(option)
-    photo_detail = jm_client.get_photo_detail(jm_photo_id)
-    download_by_photo_detail(photo_detail, option)
+    return downloader(option)
 
 
-def download_by_photo_detail(photo_detail: JmPhotoDetail,
-                             option=None,
-                             ):
-    """
-    下载一个本子的一章，根据 photo_detail
-    @param photo_detail: 本子章节信息
-    @param option: 选项
-    """
-    option, jm_client = build_client(option)
-
-    # 下载准备
-    use_cache = option.download_cache
-    decode_image = option.download_image_decode
-    jm_client.check_photo(photo_detail)
-
-    # 下载每个图片的函数
-    def download_image(index, image: JmImageDetail, debug_topic='image'):
-        img_save_path = option.decide_image_filepath(photo_detail, index)
-        debug_tag = f'{image.aid}/{image.filename} [{index + 1}/{len(photo_detail)}]'
-
-        # 已下载过，缓存命中
-        if use_cache is True and file_exists(img_save_path):
-            jm_debug(debug_topic,
-                     f'图片已存在: {debug_tag} ← [{img_save_path}]')
-            return
-
-        # 开始下载
-        jm_client.download_by_image_detail(
-            image,
-            img_save_path,
-            decode_image=decode_image,
-        )
-
-        jm_debug(debug_topic,
-                 f'图片下载完成: {debug_tag}, [{image.img_url}] → [{img_save_path}]')
-
-    length = len(photo_detail)
-    # 根据图片数，决定下载策略
-    if length <= option.download_threading_batch_count:
-        # 如果图片数小的话，直接使用多线程下载，一张图一个线程。
-        multi_thread_launcher(
-            iter_objs=enumerate(photo_detail),
-            apply_each_obj_func=download_image,
-        )
-    else:
-        # 如果图片数多的话，还是分批下载。
-        multi_task_launcher_batch(
-            iter_objs=enumerate(photo_detail),
-            apply_each_obj_func=download_image,
-            batch_size=option.download_threading_batch_count
-        )
+def create_option_by_file(filepath):
+    return JmModuleConfig.option_class().from_file(filepath)
 
 
-def build_client(option: Optional[JmOption]) -> Tuple[JmOption, JmcomicClient]:
-    """
-    处理option的判空，并且创建jm_client
-    """
-    if option is None:
-        option = JmOption.default()
+def create_option_by_env(env_name='JM_OPTION_PATH'):
+    from .cl import get_env
 
-    jm_client = option.build_jm_client()
-    return option, jm_client
+    filepath = get_env(env_name, None)
+    ExceptionTool.require_true(filepath is not None,
+                               f'未配置环境变量: {env_name}，请配置为option的文件路径')
+    return create_option_by_file(filepath)
 
 
-def create_option(filepath: str) -> JmOption:
-    option = JmOption.from_file(filepath)
-    return option
+def create_option_by_str(text: str, mode=None):
+    if mode is None:
+        mode = PackerUtil.mode_yml
+    data = PackerUtil.unpack_by_str(text, mode)[0]
+    return JmModuleConfig.option_class().construct(data)
+
+
+create_option = create_option_by_file

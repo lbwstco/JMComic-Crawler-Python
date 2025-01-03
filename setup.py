@@ -27,10 +27,11 @@ setup(
     package_dir={"": "src"},
     python_requires=">=3.7",
     install_requires=[
-        'commonX',
         'curl_cffi',
+        'commonX',
         'PyYAML',
         'Pillow',
+        'pycryptodome',
     ],
     keywords=['python', 'jmcomic', '18comic', '禁漫天堂', 'NSFW'],
     classifiers=[
@@ -41,8 +42,14 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Operating System :: MacOS",
         "Operating System :: POSIX :: Linux",
         "Operating System :: Microsoft :: Windows",
     ],
+    entry_points={
+        'console_scripts': [
+            'jmcomic = jmcomic.cl:main'
+        ]
+    }
 )

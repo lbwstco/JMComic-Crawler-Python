@@ -1,78 +1,135 @@
-# 下方填入你要下载的本子的id，一行一个。
-# 每行的首尾可以有空白字符
-jm_albums = '''
-452859
+from jmcomic import *
+from jmcomic.cl import JmcomicUI
 
+# 下方填入你要下载的本子的id，一行一个，每行的首尾可以有空白字符
+jm_albums = '''
+
+
+
+'''
+
+# 单独下载章节
+jm_photos = '''
 
 
 
 '''
 
 
+def env(name, default, trim=('[]', '""', "''")):
+    import os
+    value = os.getenv(name, None)
+    if value is None or value == '':
+        return default
+
+    for pair in trim:
+        if value.startswith(pair[0]) and value.endswith(pair[1]):
+            value = value[1:-1]
+
+    return value
+
+
+def get_id_set(env_name, given):
+    aid_set = set()
+    for text in [
+        given,
+        (env(env_name, '')).replace('-', '\n'),
+    ]:
+        aid_set.update(str_to_set(text))
+
+    return aid_set
+
+
 def main():
-    from jmcomic import str_to_list, download_album
-    # 下载漫画
-    download_album(str_to_list(jm_albums), option=get_option())
+    album_id_set = get_id_set('JM_ALBUM_IDS', jm_albums)
+    photo_id_set = get_id_set('JM_PHOTO_IDS', jm_photos)
+
+    helper = JmcomicUI()
+    helper.album_id_list = list(album_id_set)
+    helper.photo_id_list = list(photo_id_set)
+
+    option = get_option()
+    helper.run(option)
+    option.call_all_plugin('after_download')
 
 
 def get_option():
-    from jmcomic import create_option, print_eye_catching
-
     # 读取 option 配置文件
-    option = create_option('../assets/config/option_workflow_download.yml')
-    hook_debug(option)
+    option = create_option(os.path.abspath(os.path.join(__file__, '../../assets/option/option_workflow_download.yml')))
 
-    # 启用 client 的缓存
-    client = option.build_jm_client()
-    client.enable_cache()
+    # 支持工作流覆盖配置文件的配置
+    cover_option_config(option)
 
-    # 检查环境变量中是否有禁漫的用户名和密码，如果有则登录
-    # 禁漫的大部分本子，下载是不需要登录的，少部分敏感题材需要登录
-    # 如果你希望以登录状态下载本子，你需要自己配置一下Github Actions的 `secrets`
-    # 配置的方式很简单，网页上点一点就可以了
-    # 具体做法请去看官方教程：https://docs.github.com/en/actions/security-guides/encrypted-secrets
-
-    # 萌新注意！！！如果你想 `开源` 你的禁漫帐号，你也可以直接把账号密码写到下面的代码😅
-
-    username = get_env('JM_USERNAME')
-    password = get_env('JM_PASSWORD')
-
-    if username is not None and password is not None:
-        client.login(username, password, True)
-        print_eye_catching(f'登录禁漫成功')
+    # 把请求错误的html下载到文件，方便GitHub Actions下载查看日志
+    log_before_raise()
 
     return option
 
 
-def hook_debug(option):
-    from jmcomic import JmHtmlClient, workspace, mkdir_if_not_exists
+def cover_option_config(option: JmOption):
+    dir_rule = env('DIR_RULE', None)
+    if dir_rule is not None:
+        the_old = option.dir_rule
+        the_new = DirRule(dir_rule, base_dir=the_old.base_dir)
+        option.dir_rule = the_new
 
-    jm_download_dir = get_env('JM_DOWNLOAD_DIR') or workspace()
+    impl = env('CLIENT_IMPL', None)
+    if impl is not None:
+        option.client.impl = impl
+
+    suffix = env('IMAGE_SUFFIX', None)
+    if suffix is not None:
+        option.download.image.suffix = fix_suffix(suffix)
+
+
+def log_before_raise():
+    jm_download_dir = env('JM_DOWNLOAD_DIR', workspace())
     mkdir_if_not_exists(jm_download_dir)
 
-    class RaiseErrorAwareClient(JmHtmlClient):
+    def decide_filepath(e):
+        resp = e.context.get(ExceptionTool.CONTEXT_KEY_RESP, None)
 
-        @classmethod
-        def raise_request_error(cls, resp, msg=None):
-            from common import write_text, fix_windir_name, format_ts
-            write_text(
-                f'{jm_download_dir}/{fix_windir_name(resp.url)}',
-                resp.text
-            )
+        if resp is None:
+            suffix = str(time_stamp())
+        else:
+            suffix = resp.url
 
-            return super().raise_request_error(resp, msg)
+        name = '-'.join(
+            fix_windir_name(it)
+            for it in [
+                e.description,
+                current_thread().name,
+                suffix
+            ]
+        )
 
-    option.jm_client_impl_mapping['html'] = RaiseErrorAwareClient
+        path = f'{jm_download_dir}/【出错了】{name}.log'
+        return path
 
+    def exception_listener(e: JmcomicException):
+        """
+        异常监听器，实现了在 GitHub Actions 下，把请求错误的信息下载到文件，方便调试和通知使用者
+        """
+        # 决定要写入的文件路径
+        path = decide_filepath(e)
 
-def get_env(name):
-    import os
-    value = os.getenv(name, None)
+        # 准备内容
+        content = [
+            str(type(e)),
+            e.msg,
+        ]
+        for k, v in e.context.items():
+            content.append(f'{k}: {v}')
 
-    if value is None or value == '':
-        return None
+        # resp.text
+        resp = e.context.get(ExceptionTool.CONTEXT_KEY_RESP, None)
+        if resp:
+            content.append(f'响应文本: {resp.text}')
 
-    return value
+        # 写文件
+        write_text(path, '\n'.join(content))
+
+    JmModuleConfig.register_exception_listener(JmcomicException, exception_listener)
 
 
 if __name__ == '__main__':
